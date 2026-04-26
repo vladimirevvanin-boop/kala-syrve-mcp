@@ -19,6 +19,7 @@ SYRVE_URL = os.getenv("SYRVE_URL", "https://kala-restaurant.syrve.online")
 SYRVE_LOGIN = os.getenv("SYRVE_LOGIN", "Viewer")
 SYRVE_PASSWORD = os.getenv("SYRVE_PASSWORD", "112233")
 ORG_NAME = os.getenv("ORG_NAME", "Kala")
+API_KEY = os.getenv("MCP_API_KEY", "")
 
 mcp = FastMCP("surf-syrve")
 
@@ -291,9 +292,31 @@ def check_connection() -> str:
 
 if __name__ == "__main__":
     import sys
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    class ApiKeyMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if API_KEY:
+                key = request.headers.get("x-api-key") or request.query_params.get("api_key")
+                if key != API_KEY:
+                    return Response("Unauthorized", status_code=401)
+            return await call_next(request)
+
     # HTTP/SSE mode for Cowork (remote), stdio for Claude Code (local)
     if "--http" in sys.argv or os.getenv("MCP_TRANSPORT") == "http":
+        import uvicorn
         port = int(os.getenv("PORT", 8000))
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=port, path="/mcp")
+        app = mcp.streamable_http_app()
+        if API_KEY:
+            from starlette.applications import Starlette
+            from starlette.middleware import Middleware
+            from starlette.routing import Mount
+            app = Starlette(
+                routes=[Mount("/", app=app)],
+                middleware=[Middleware(ApiKeyMiddleware)],
+            )
+        uvicorn.run(app, host="0.0.0.0", port=port)
     else:
         mcp.run()

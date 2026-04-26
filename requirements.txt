@@ -1,3 +1,5 @@
 mcp[cli]
 httpx
 python-dotenv
+uvicorn
+starlette
