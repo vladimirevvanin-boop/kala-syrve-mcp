@@ -293,66 +293,14 @@ def check_connection() -> str:
 if __name__ == "__main__":
     import sys
 
-    # HTTP/SSE mode for Cowork (remote), stdio for Claude Code (local)
+    # HTTP mode for Cowork (remote), stdio for Claude Code (local)
     if "--http" in sys.argv or os.getenv("MCP_TRANSPORT") == "http":
-        import uvicorn
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-
         port = int(os.getenv("PORT", 8000))
-
-        session_manager = StreamableHTTPSessionManager(
-            app=mcp._mcp_server,
-            stateless=True,
-        )
-
-        import anyio
-        from urllib.parse import parse_qs
-
-        class KalaApp:
-            """Clean ASGI app: manages MCP lifecycle + API key auth."""
-
-            async def __call__(self, scope, receive, send):
-                if scope["type"] == "lifespan":
-                    await self._handle_lifespan(scope, receive, send)
-                elif scope["type"] == "http":
-                    await self._handle_http(scope, receive, send)
-
-            async def _handle_lifespan(self, scope, receive, send):
-                import anyio
-                await receive()  # lifespan.startup
-                started = anyio.Event()
-                shutdown = anyio.Event()
-
-                async def _runner():
-                    async with session_manager.run():
-                        started.set()
-                        await shutdown.wait()
-
-                async with anyio.create_task_group() as tg:
-                    tg.start_soon(_runner)
-                    await started.wait()
-                    await send({"type": "lifespan.startup.complete"})
-                    await receive()  # lifespan.shutdown
-                    shutdown.set()
-                await send({"type": "lifespan.shutdown.complete"})
-
-            async def _handle_http(self, scope, receive, send):
-                if API_KEY:
-                    headers = dict(scope.get("headers", []))
-                    key = headers.get(b"x-api-key", b"").decode()
-                    if not key:
-                        qs = parse_qs(scope.get("query_string", b"").decode())
-                        key = qs.get("api_key", [""])[0]
-                    if key != API_KEY:
-                        await send({"type": "http.response.start", "status": 401,
-                                    "headers": [(b"content-type", b"text/plain")]})
-                        await send({"type": "http.response.body", "body": b"Unauthorized"})
-                        return
-                await session_manager.handle_request(scope, receive, send)
-
-        app = KalaApp()
-
-
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        # Embed API key in path — simple, no middleware needed
+        path = f"/mcp/{API_KEY}" if API_KEY else "/mcp"
+        mcp.settings.host = "0.0.0.0"
+        mcp.settings.port = port
+        mcp.settings.streamable_http_path = path
+        mcp.run(transport="streamable-http")
     else:
         mcp.run()
