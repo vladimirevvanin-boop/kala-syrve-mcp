@@ -292,31 +292,36 @@ def check_connection() -> str:
 
 if __name__ == "__main__":
     import sys
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.requests import Request
-    from starlette.responses import Response
-
-    class ApiKeyMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            if API_KEY:
-                key = request.headers.get("x-api-key") or request.query_params.get("api_key")
-                if key != API_KEY:
-                    return Response("Unauthorized", status_code=401)
-            return await call_next(request)
 
     # HTTP/SSE mode for Cowork (remote), stdio for Claude Code (local)
     if "--http" in sys.argv or os.getenv("MCP_TRANSPORT") == "http":
         import uvicorn
+        from starlette.types import ASGIApp, Scope, Receive, Send
+
         port = int(os.getenv("PORT", 8000))
-        app = mcp.streamable_http_app()
-        if API_KEY:
-            from starlette.applications import Starlette
-            from starlette.middleware import Middleware
-            from starlette.routing import Mount
-            app = Starlette(
-                routes=[Mount("/", app=app)],
-                middleware=[Middleware(ApiKeyMiddleware)],
-            )
+        mcp_app = mcp.streamable_http_app()
+
+        class ApiKeyMiddleware:
+            """Pure ASGI middleware — preserves lifespan events for MCP task group."""
+            def __init__(self, app: ASGIApp):
+                self.app = app
+
+            async def __call__(self, scope: Scope, receive: Receive, send: Send):
+                if scope["type"] == "http" and API_KEY:
+                    headers = {k.lower(): v for k, v in scope.get("headers", [])}
+                    key = headers.get(b"x-api-key", b"").decode()
+                    if not key:
+                        from urllib.parse import parse_qs
+                        qs = parse_qs(scope.get("query_string", b"").decode())
+                        key = qs.get("api_key", [""])[0]
+                    if key != API_KEY:
+                        await send({"type": "http.response.start", "status": 401,
+                                    "headers": [(b"content-type", b"text/plain")]})
+                        await send({"type": "http.response.body", "body": b"Unauthorized"})
+                        return
+                await self.app(scope, receive, send)
+
+        app = ApiKeyMiddleware(mcp_app) if API_KEY else mcp_app
         uvicorn.run(app, host="0.0.0.0", port=port)
     else:
         mcp.run()
