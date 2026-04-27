@@ -296,22 +296,48 @@ if __name__ == "__main__":
     # HTTP/SSE mode for Cowork (remote), stdio for Claude Code (local)
     if "--http" in sys.argv or os.getenv("MCP_TRANSPORT") == "http":
         import uvicorn
-        from starlette.types import ASGIApp, Scope, Receive, Send
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
         port = int(os.getenv("PORT", 8000))
-        mcp_app = mcp.streamable_http_app()
 
-        class ApiKeyMiddleware:
-            """Pure ASGI middleware — preserves lifespan events for MCP task group."""
-            def __init__(self, app: ASGIApp):
-                self.app = app
+        session_manager = StreamableHTTPSessionManager(
+            app=mcp._mcp_server,
+            stateless=True,
+        )
 
-            async def __call__(self, scope: Scope, receive: Receive, send: Send):
-                if scope["type"] == "http" and API_KEY:
-                    headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        import anyio
+        from urllib.parse import parse_qs
+
+        class KalaApp:
+            """Clean ASGI app: manages MCP lifecycle + API key auth."""
+
+            async def __call__(self, scope, receive, send):
+                if scope["type"] == "lifespan":
+                    await self._handle_lifespan(scope, receive, send)
+                elif scope["type"] == "http":
+                    await self._handle_http(scope, receive, send)
+
+            async def _handle_lifespan(self, scope, receive, send):
+                msg = await receive()
+                if msg["type"] == "lifespan.startup":
+                    try:
+                        self._session_ctx = session_manager.run()
+                        await self._session_ctx.__aenter__()
+                        await send({"type": "lifespan.startup.complete"})
+                    except Exception as e:
+                        await send({"type": "lifespan.startup.failed",
+                                    "message": str(e)})
+                        return
+                msg = await receive()
+                if msg["type"] == "lifespan.shutdown":
+                    await self._session_ctx.__aexit__(None, None, None)
+                    await send({"type": "lifespan.shutdown.complete"})
+
+            async def _handle_http(self, scope, receive, send):
+                if API_KEY:
+                    headers = dict(scope.get("headers", []))
                     key = headers.get(b"x-api-key", b"").decode()
                     if not key:
-                        from urllib.parse import parse_qs
                         qs = parse_qs(scope.get("query_string", b"").decode())
                         key = qs.get("api_key", [""])[0]
                     if key != API_KEY:
@@ -319,9 +345,11 @@ if __name__ == "__main__":
                                     "headers": [(b"content-type", b"text/plain")]})
                         await send({"type": "http.response.body", "body": b"Unauthorized"})
                         return
-                await self.app(scope, receive, send)
+                await session_manager.handle_request(scope, receive, send)
 
-        app = ApiKeyMiddleware(mcp_app) if API_KEY else mcp_app
+        app = KalaApp()
+
+
         uvicorn.run(app, host="0.0.0.0", port=port)
     else:
         mcp.run()
