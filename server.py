@@ -318,20 +318,23 @@ if __name__ == "__main__":
                     await self._handle_http(scope, receive, send)
 
             async def _handle_lifespan(self, scope, receive, send):
-                msg = await receive()
-                if msg["type"] == "lifespan.startup":
-                    try:
-                        self._session_ctx = session_manager.run()
-                        await self._session_ctx.__aenter__()
-                        await send({"type": "lifespan.startup.complete"})
-                    except Exception as e:
-                        await send({"type": "lifespan.startup.failed",
-                                    "message": str(e)})
-                        return
-                msg = await receive()
-                if msg["type"] == "lifespan.shutdown":
-                    await self._session_ctx.__aexit__(None, None, None)
-                    await send({"type": "lifespan.shutdown.complete"})
+                import anyio
+                await receive()  # lifespan.startup
+                started = anyio.Event()
+                shutdown = anyio.Event()
+
+                async def _runner():
+                    async with session_manager.run():
+                        started.set()
+                        await shutdown.wait()
+
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(_runner)
+                    await started.wait()
+                    await send({"type": "lifespan.startup.complete"})
+                    await receive()  # lifespan.shutdown
+                    shutdown.set()
+                await send({"type": "lifespan.shutdown.complete"})
 
             async def _handle_http(self, scope, receive, send):
                 if API_KEY:
